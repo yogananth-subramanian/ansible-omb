@@ -1,0 +1,201 @@
+---
+- hosts: localhost
+  tasks:
+   - debug:
+       var: cluster_name
+
+   - name: Check for cluster name and type
+     fail:
+       msg: "cluster_name and cluster type  must be set"
+     when: cluster_name is not defined or cluster is not defined
+
+   - name: Include secret
+     include_vars: files/secrets-vars.yaml
+
+   - name: Include cluster variables
+     include_vars: files/{{cluster}}-vars.yaml
+
+   - name: Configure docker env
+     template:
+       src: files/docker.j2
+       dest: files/docker.env
+
+   - name: Pull container
+     containers.podman.podman_image:
+       name: quay.io/app-sre/mk-ci-tools
+       tag: kas-latest
+       force: true
+
+   - name: Run container
+     containers.podman.podman_container:
+       name: "{{cluster_name}}"
+       image: quay.io/app-sre/mk-ci-tools:kas-latest
+       state: started
+       command:  tail -F anything
+       env_file: files/docker.env
+       env: 
+         KAFKA_CLUSTER_NAME={{cluster_name}}
+
+   - name: Add container to inventory
+     tags: always
+     add_host:
+       ansible_connection: podman
+       name: "{{cluster_name}}"
+       ansible_host: "{{cluster_name}}"
+       ansible_user: ci
+       groups: containers
+     changed_when: false
+
+   - name: Set cluster variable in container 
+     tags: always
+     set_fact:
+       cluster: "{{cluster}}"
+       cacheable: yes
+     delegate_to: "{{cluster_name}}"
+     delegate_facts: true
+
+
+
+- hosts: containers
+  tasks:
+
+  - name: copy Makefile
+    tags: install
+    copy: 
+      src: files/Makefile
+      dest: /home/ci
+
+  - name: Create RHOSAK cluster
+    tags: install
+    make: 
+      chdir: /home/ci
+      target: cluster_create
+
+  - name: Enable standard mode
+    tags: install,kafka_create
+    make:
+      chdir: /home/ci
+      target: enable_std
+    when: cluster != 'dev'
+
+  - name: Create kafka cluster
+    tags: install,kafka_create
+    make: 
+      chdir: /home/ci
+      target: kafka_create
+
+  - name: Create OMB cluster
+    tags: install,omb_create
+    make:
+      chdir: /home/ci
+      target: setup_omb
+
+  - name: Get OMB client IP
+    tags: omb_run
+    shell:
+      cmd: cd /opt/tools/benchmark/driver-kafka/deploy/hdd-deployment/aws; terraform output client_ssh_host | cut -d'"' -f2
+      chdir: /home/ci
+    register:  omb_ip
+
+  - name: Set OMB client IP on localhost
+    tags: omb_run
+    set_fact:
+      omb_client: "{{omb_ip.stdout}}"
+      cacheable: yes
+    delegate_to: localhost
+    delegate_facts: true
+
+  - name: Get oc login Cred
+    tags: omb_run
+    shell:
+      cmd: python3 -u /opt/tools/scripts/ocm.py "oc_login" -c "${KAFKA_CLUSTER_NAME}"|tail -n1|sed -e 's/.*Login Command:\s//'
+      chdir: /home/ci
+    register:  oc_out
+
+  - name: debug oc login
+    tags: omb_run
+    debug:
+      var: oc_out
+
+  - name: Set oc login variable on localhost
+    tags: omb_run
+    set_fact:
+      oc_login: "{{oc_out.stdout|replace('\"','')}}"
+      cacheable: yes
+    delegate_to: localhost
+    delegate_facts: true
+
+  - name: Copy ssh key from container to host
+    tags: omb_run
+    fetch:
+      src: /tmp/.ssh/kafka_cloud
+      dest: /root/.ssh/kafka_cloud
+      flat: yes
+
+  - name:  Copy ssh pubkey from container to host
+    tags: omb_run
+    fetch:
+      src: /tmp/.ssh/kafka_cloud.pub
+      dest: /root/.ssh/kafka_cloud.pub
+      flat: yes
+
+
+- hosts: localhost
+  tasks:
+   - name: Oc login from host
+     tags: omb_run
+     shell:
+       cmd: "{{oc_login}}"
+
+   - name: Clone kruize-demos
+     tags: omb_run
+     ansible.builtin.git:
+       repo: https://github.com/yogananth-subramanian/kruize-demos.git
+       dest: /root/kruize-demos
+       single_branch: yes
+       version: kafka
+
+   - name: Clone benchmarks
+     tags: omb_run
+     ansible.builtin.git:
+       repo: https://github.com/yogananth-subramanian/benchmarks.git
+       dest: /root/kruize-demos/benchmarks
+       single_branch: yes
+       version: kafka
+
+   - name: Run Standalone OMB
+     tags: omb_run
+     include_tasks:
+       file: omb.yml
+       apply:
+        tags:
+          - omb_run
+     when: not hpo | bool
+
+   - name: Run OMB with HPO
+     tags: omb_run
+     include_tasks:
+       file: hpo.yml
+       apply:
+        tags:
+          - omb_run
+     when: hpo | bool
+
+
+- hosts: containers
+  tasks:
+  - name: Delete Kafka and OMB cluster
+    tags: cleanup
+    make:
+      chdir: /home/ci
+      target: cluster_delete
+
+
+- hosts: localhost
+  tasks:
+   - name: Remove container
+     tags: cleanup
+     containers.podman.podman_container:
+       name: "{{cluster_name}}"
+       state: absent
+

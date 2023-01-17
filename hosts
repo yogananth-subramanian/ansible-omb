@@ -1,0 +1,2 @@
+localhost ansible_connection=local cluster_name=ysubrama-1 cluster=dev iter=1 hpo=false
+

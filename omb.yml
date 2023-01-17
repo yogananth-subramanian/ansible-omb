@@ -1,0 +1,14 @@
+---
+   - name: Debug OMB client IP
+     debug:
+       var:  omb_client
+
+   - name: Run OMB 
+     shell:
+       cmd: "/root/kruize-demos/benchmarks/kafka/scripts/perf/run.sh {{omb_client}} {{iter}} files/input.csv"
+     register: omb_output
+
+   - name: OMB output
+     debug:
+       var: omb_output.stdout
+

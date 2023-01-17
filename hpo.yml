@@ -1,0 +1,48 @@
+---
+ - name: Start HPO service and run HPO OMB
+   block:
+   - name: Debug OMB client IP
+     debug:
+       var:  omb_client
+
+   - name: Clone HPO repo
+     ansible.builtin.git:
+       repo: https://github.com/kruize/hpo.git
+       dest: /root/hpo
+       single_branch: yes
+       version: main
+
+   - name: Install requirements
+     pip:
+       requirements: requirements.txt
+       virtualenv: .venv
+       chdir: /roo/hpo
+       virtualenv_command: python -m venv
+
+   - name: Start HPO service
+     shell:
+       cmd: systemd-run --working-directory=/root/hpo/ --unit=hpo sh -c 'source /root/hpo/.venv/bin/activate;/root/hpo/deploy_hpo.sh'
+       chdir: /root/hpo/
+
+   - name: Wait for HPO service to startup
+     pause:
+       seconds: 30
+
+   - name: Run HPO OMB benchmark
+     shell:
+       cmd: "/root/kruize-demos/kafkarun.sh {{omb_client}} {{iter}}  /root/kruize-demos/hpo_helpers/kafka_search_space.json  /root/kruize-demos/hpo_helpers/kafka.json aggregatedEndToEndLatency99pct"
+       chdir: /root/tuned/kruize-demos/
+     register: omb_output
+
+   - name: HPO OMB output
+     debug:
+       var: omb_output.stdout
+
+   - name: Pause for HPO service to terminate
+     pause:
+       seconds: 60
+
+   always:
+   - name: Stop HPO service
+     shell:
+       cmd: systemctl stop hpo
