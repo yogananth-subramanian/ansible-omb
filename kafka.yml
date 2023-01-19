@@ -1,5 +1,7 @@
 ---
 - hosts: localhost
+  vars_files:
+    - files/required-vars.yaml
   tasks:
    - debug:
        var: cluster_name
@@ -14,6 +16,12 @@
 
    - name: Include cluster variables
      include_vars: files/{{cluster}}-vars.yaml
+
+   - name: Check for required variables
+     fail:
+       msg: "{{item}}  must be set"
+     when: item not in hostvars[inventory_hostname]
+     with_items: "{{required_vars}}"
 
    - name: Configure docker env
      template:
